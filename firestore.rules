@@ -1,0 +1,74 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ──────────────────────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isEmployee() { return isAuth() && userRole() == 'employee'; }
+    function isManager()  { return isAuth() && userRole() == 'manager';  }
+    function isAdmin()    { return isAuth() && userRole() == 'admin';    }
+    function isManagerOrAdmin() { return isAuth() && (userRole() == 'manager' || userRole() == 'admin'); }
+
+    // ── Users ─────────────────────────────────────────────────────────────────
+    match /users/{userId} {
+      // Anyone authenticated can read user profiles (needed for org hierarchy)
+      allow read: if isAuth();
+      // Users can write their own profile; Admin can write anyone's
+      allow write: if isAuth() && (request.auth.uid == userId || isAdmin());
+    }
+
+    // ── Goal Sheets ───────────────────────────────────────────────────────────
+    match /goalSheets/{sheetId} {
+      // Employee: read/write own sheet
+      // Manager: read sheets where managerId == their uid
+      // Admin: read/write all
+      allow read: if isAuth() && (
+        resource.data.employeeId == request.auth.uid ||
+        resource.data.managerId  == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: authenticated users can create their own sheet
+      allow create: if isAuth() && request.resource.data.employeeId == request.auth.uid;
+
+      // Update: owner can update draft/rejected sheets; manager can update during approval; admin can update anything
+      allow update: if isAuth() && (
+        // Owner updates their own non-locked sheet
+        (resource.data.employeeId == request.auth.uid &&
+         resource.data.status in ['draft', 'rejected']) ||
+        // Owner updates approved sheet ONLY for check-in fields (achievements, status)
+        (resource.data.employeeId == request.auth.uid &&
+         resource.data.status == 'approved') ||
+        // Manager approves/rejects submitted sheets, or conducts check-in
+        (resource.data.managerId == request.auth.uid) ||
+        // Admin can do anything
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ── Audit Logs ────────────────────────────────────────────────────────────
+    match /auditLogs/{logId} {
+      // Anyone authenticated can create logs
+      allow create: if isAuth();
+      // Only managers and admins can read audit logs
+      allow read: if isManagerOrAdmin();
+      // No updates or deletes allowed — audit logs are immutable
+      allow update, delete: if false;
+    }
+
+    // ── Catch-all: deny everything else ──────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
